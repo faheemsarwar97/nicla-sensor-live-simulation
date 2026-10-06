@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description"
+    content="Blackbox Live Stream Dashboard — Nicla Sense ME BHI260AP real-time 3D orientation and sensor graphs">
+  <title>Blackbox Live Stream · Nicla Sense ME · BHI260AP</title>
+
+  <!-- Chart.js for live graphs (same plots as live_stream.py) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <!-- chartjs-plugin-annotation for threshold lines -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+
+  <!-- Three.js r152 via ES module imports (examples/js/ is deprecated → use examples/jsm/) -->
+  <script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/"
+  }
+}
+</script>
+
+  <style>
+    /* ─── Exact color tokens from live_stream.py ─── */
+    :root {
+      --dark-bg: #0d1117;
+      --card-bg: #161b22;
+      --grid-c: #21262d;
+      --text-c: #c9d1d9;
+      --dim-c: #8b949e;
+
+      --col-x: #79c0ff;
+      --col-y: #56d364;
+      --col-z: #f78166;
+      --col-r: #e3b341;
+      --col-gx: #d2a8ff;
+      --col-gy: #ffa657;
+      --col-gz: #39d353;
+
+      --col-idle: #3fb950;
+      --col-ff: #388bfd;
+      --col-imp: #f85149;
+      --col-set: #e3b341;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: var(--dark-bg);
+      color: var(--text-c);
+      font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;
+      overflow-x: hidden;
+    }
+
+    /* ─── Title bar ─── */
+    .title-bar {
+      text-align: center;
+      padding: 14px 0 8px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: var(--text-c);
+      border-bottom: 1px solid var(--grid-c);
+    }
+
+    /* ─── 3×2 grid identical to matplotlib layout ─── */
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 2fr 1.5fr 1.5fr;
+      gap: 8px;
+      padding: 8px;
+      height: calc(100vh - 52px);
+    }
+
+    .cell {
+      background: var(--dark-bg);
+      border: 1px solid var(--grid-c);
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ─── Phase banner (row 0, col 0) ─── */
+    #phase-cell {
+      background: var(--card-bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.3s;
+    }
+
+    #phase-cell.impact {
+      background: #1a0505;
+    }
+
+    #g-readout {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 13px;
+      color: var(--text-c);
+      margin-bottom: 8px;
+    }
+
+    #phase-label {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 36px;
+      font-weight: 700;
+      transition: color 0.2s;
+    }
+
+    #phase-sub {
+      font-size: 14px;
+      color: var(--dim-c);
+      margin-top: 8px;
+    }
+
+    /* ─── 3D viewport (row 0, col 1) ─── */
+    #three-cell {
+      position: relative;
+    }
+
+    #three-cell canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    #three-title {
+      position: absolute;
+      top: 6px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-c);
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    #euler-label {
+      position: absolute;
+      bottom: 8px;
+      left: 12px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 10.5px;
+      color: var(--dim-c);
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    /* ─── Chart cells ─── */
+    .chart-cell {
+      padding: 4px 6px 2px;
+    }
+
+    .chart-cell canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    /* ─── Stats cell ─── */
+    #stats-cell {
+      padding: 12px 16px;
+      overflow-y: auto;
+    }
+
+    #stats-pre {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 12px;
+      color: var(--text-c);
+      background: var(--card-bg);
+      border: 1px solid var(--grid-c);
+      border-radius: 6px;
+      padding: 12px 14px;
+      line-height: 1.6;
+      white-space: pre;
+    }
+
+    /* ─── Connection status toast ─── */
+    #ws-status {
+      position: fixed;
+      top: 8px;
+      right: 12px;
+      font-size: 11px;
+      padding: 4px 12px;
+      border-radius: 12px;
+      z-index: 100;
+      font-weight: 600;
+    }
+
+    #ws-status.ok {
+      background: #0d2818;
+      color: var(--col-idle);
+      border: 1px solid #1a5c2e;
+    }
+
+    #ws-status.wait {
+      background: #1a1800;
+      color: var(--col-set);
+      border: 1px solid #4a3e00;
+    }
+
+    #ws-status.err {
+      background: #200808;
+      color: var(--col-imp);
+      border: 1px solid #5c1a1a;
+    }
+
+    /* ─── Loading overlay for GLB ─── */
+    #loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(13, 17, 23, 0.92);
+      z-index: 5;
+      transition: opacity 0.5s;
+    }
+
+    #loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid var(--grid-c);
+      border-top-color: var(--col-x);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    #loading-text {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--dim-c);
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="title-bar">Blackbox Live Stream · Nicla Sense ME · BHI260AP</div>
+  <div id="ws-status" class="wait">⏳ Connecting to bridge…</div>
+
+  <div class="grid">
+    <!-- Row 0 -->
+    <div id="phase-cell" class="cell">
+      <div id="g-readout">|g| = 1.000</div>
+      <div id="phase-label" style="color: var(--col-idle);">● IDLE</div>
+      <div id="phase-sub">Device at rest</div>
+    </div>
+    <div id="three-cell" class="cell">
+      <div id="three-title">3D Orientation — BHI260AP Rotation Vector</div>
+      <div id="euler-label">R=+0° P=+0° Y=+0°</div>
+      <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div id="loading-text">Loading niclaSenseME.glb…</div>
+      </div>
+    </div>
+
+    <!-- Row 1 -->
+    <div class="cell chart-cell">
+      <canvas id="chart-acc"></canvas>
+    </div>
+    <div class="cell chart-cell">
+      <canvas id="chart-gyro"></canvas>
+    </div>
+
+    <!-- Row 2 -->
+    <div class="cell chart-cell">
+      <canvas id="chart-R"></canvas>
+    </div>
+    <div id="stats-cell" class="cell">
+      <pre id="stats-pre">Waiting for data…</pre>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // ══════════════════════════════════════════════════════════════
+    //  CONSTANTS  (match live_stream.py exactly)
+    // ══════════════════════════════════════════════════════════════
+    const WINDOW_MS = 4000;
+    const FF_THRESH_G = 0.25;
+    const IMP_THRESH_G = 4.00;
+    const SMOOTH_N = 20;
+    const IMPACT_LATCH_MS = 1500;
+
+    const PHASE_CFG = {
+      "IDLE": { col: "#3fb950", lbl: "●  IDLE", sub: "Device at rest" },
+      "FREE-FALL": { col: "#388bfd", lbl: "↓  FREE-FALL", sub: "Falling…" },
+      "IMPACT": { col: "#f85149", lbl: "✦  IMPACT", sub: "Impact detected!" },
+      "SETTLE": { col: "#e3b341", lbl: "~  SETTLING", sub: "Coming to rest" },
+    };
+
+    // ══════════════════════════════════════════════════════════════
+    //  ROLLING BUFFERS  (same structure as live_stream.py deques)
+    // ══════════════════════════════════════════════════════════════
+    const MAX_SAMPLES = Math.floor(WINDOW_MS * 200 / 1000) + 100;
+
+    class RingBuffer {
+      constructor(max) { this.max = max; this.data = []; }
+      push(v) { this.data.push(v); if (this.data.length > this.max) this.data.shift(); }
+      last(n) { return this.data.slice(-n); }
+      get length() { return this.data.length; }
+      get array() { return this.data; }
+      get lastVal() { return this.data[this.data.length - 1]; }
+    }
+
+    const buf_t = new RingBuffer(MAX_SAMPLES);
+    const buf_ax = new RingBuffer(MAX_SAMPLES);
+    const buf_ay = new RingBuffer(MAX_SAMPLES);
+    const buf_az = new RingBuffer(MAX_SAMPLES);
+    const buf_R = new RingBuffer(MAX_SAMPLES);
+    const buf_gx = new RingBuffer(MAX_SAMPLES);
+    const buf_gy = new RingBuffer(MAX_SAMPLES);
+    const buf_gz = new RingBuffer(MAX_SAMPLES);
+
+    let latest_quat = { qx: 0, qy: 0, qz: 0, qw: 1 };
+    let t0_ms = null;
+    let totalSamples = 0;
+    let bleStatus = "Connecting…";
+    let _impactLatchUntil = 0;
+
+    // ══════════════════════════════════════════════════════════════
+    //  PHASE DETECTION  (exact copy of phase_of_smart)
+    // ══════════════════════════════════════════════════════════════
+    function phaseOfSmart() {
+      const now = Date.now();
+      const recent = buf_R.last(SMOOTH_N);
+      if (recent.length === 0) return { phase: "IDLE", Rmed: 1.0 };
+
+      const Rmax = Math.max(...recent);
+      const Rmin = Math.min(...recent);
+      const sorted = [...recent].sort((a, b) => a - b);
+      const Rmed = sorted[Math.floor(sorted.length / 2)];
+
+      if (Rmax > IMP_THRESH_G) {
+        _impactLatchUntil = now + IMPACT_LATCH_MS;
+        return { phase: "IMPACT", Rmed };
+      }
+      if (now < _impactLatchUntil) return { phase: "IMPACT", Rmed };
+      if (Rmin < FF_THRESH_G) return { phase: "FREE-FALL", Rmed };
+      if (Rmed < 0.80) return { phase: "SETTLE", Rmed };
+      return { phase: "IDLE", Rmed };
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  CHART.JS SETUP  (replicating the matplotlib panels)
+    // ══════════════════════════════════════════════════════════════
+    Chart.defaults.color = '#c9d1d9';
+    Chart.defaults.borderColor = '#21262d';
+    Chart.defaults.font.size = 10;
+
+    function makeStreamChart(canvasId, { title, yLabel, datasets, annotations }) {
+      return new Chart(document.getElementById(canvasId), {
+        type: 'line',
+        data: { datasets },
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              display: datasets.length > 1,
+              position: 'top',
+              align: 'start',
+              labels: { boxWidth: 10, padding: 6, font: { size: 9 } },
+            },
+            title: { display: true, text: title, font: { size: 11 }, padding: { bottom: 4 } },
+            annotation: annotations ? { annotations } : undefined,
+          },
+          scales: {
+            x: {
+              type: 'linear',
+              title: { display: true, text: 'Time (ms)', font: { size: 9 } },
+              grid: { color: '#21262d', lineWidth: 0.5 },
+              ticks: { font: { size: 8 } },
+            },
+            y: {
+              title: { display: true, text: yLabel, font: { size: 9 } },
+              grid: { color: '#21262d', lineWidth: 0.5 },
+              ticks: { font: { size: 8 } },
+            },
+          },
+          elements: { point: { radius: 0 } },
+        },
+      });
+    }
+
+    // Accel chart — X/Y/Z
+    const chartAcc = makeStreamChart('chart-acc', {
+      title: 'Acceleration  X / Y / Z',
+      yLabel: 'g',
+      datasets: [
+        { label: 'X', borderColor: '#79c0ff', borderWidth: 1.2, data: [] },
+        { label: 'Y', borderColor: '#56d364', borderWidth: 1.2, data: [] },
+        { label: 'Z', borderColor: '#f78166', borderWidth: 1.2, data: [] },
+      ],
+    });
+
+    // Gyro chart — X/Y/Z
+    const chartGyro = makeStreamChart('chart-gyro', {
+      title: 'Gyroscope  X / Y / Z',
+      yLabel: 'deg/s',
+      datasets: [
+        { label: 'Gx', borderColor: '#d2a8ff', borderWidth: 1.0, data: [] },
+        { label: 'Gy', borderColor: '#ffa657', borderWidth: 1.0, data: [] },
+        { label: 'Gz', borderColor: '#39d353', borderWidth: 1.0, data: [] },
+      ],
+    });
+
+    // Resultant |g| chart — with threshold lines
+    const chartR = makeStreamChart('chart-R', {
+      title: 'Resultant  |g|',
+      yLabel: 'g',
+      datasets: [
+        { label: '|g|', borderColor: '#e3b341', borderWidth: 1.5, data: [] },
+      ],
+      annotations: {
+        ffLine: {
+          type: 'line', yMin: FF_THRESH_G, yMax: FF_THRESH_G,
+          borderColor: '#388bfd', borderWidth: 0.7, borderDash: [6, 3],
+          label: {
+            display: true, content: `FF < ${FF_THRESH_G}g`, position: 'start',
+            font: { size: 9 }, color: '#388bfd', backgroundColor: 'transparent'
+          },
+        },
+        impLine: {
+          type: 'line', yMin: IMP_THRESH_G, yMax: IMP_THRESH_G,
+          borderColor: '#f85149', borderWidth: 0.7, borderDash: [6, 3],
+          label: {
+            display: true, content: `IMP > ${IMP_THRESH_G}g`, position: 'start',
+            font: { size: 9 }, color: '#f85149', backgroundColor: 'transparent'
+          },
+        },
+      },
+    });
+
+
+    // ══════════════════════════════════════════════════════════════
+    //  THREE.JS — load real niclaSenseME.glb
+    // ══════════════════════════════════════════════════════════════
+    let niclaModel = null;
+    const threeContainer = document.getElementById('three-cell');
+    const loadingOverlay = document.getElementById('loading-overlay');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0d1117);
+
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 2000);
+    camera.position.set(3, 3, 6);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.LinearToneMapping;   // was ACESFilmic — was darkening it
+    renderer.toneMappingExposure = 1.6;
+    threeContainer.appendChild(renderer.domElement);
+
+    // Orbit controls for manual inspection
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.enablePan = false;
+    controls.minDistance = 2;
+    controls.maxDistance = 20;
+
+    // Lighting — brighter, surrounds the board
+    const ambient = new THREE.AmbientLight(0xffffff, 1.4);
+    scene.add(ambient);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 2.2);
+    dirLight.position.set(5, 10, 7);
+    scene.add(dirLight);
+
+    const dirLight2 = new THREE.DirectionalLight(0xaabbff, 1.2);
+    dirLight2.position.set(-5, -3, -5);
+    scene.add(dirLight2);
+
+    const dirLight3 = new THREE.DirectionalLight(0x99aaff, 0.9);
+    dirLight3.position.set(0, -8, 2);
+    scene.add(dirLight3);
+
+    // Hemisphere light gives even, natural fill from all sides
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x444455, 1.0);
+    scene.add(hemi);
+
+    // World-up reference arrow (faint white, like live_stream.py)
+    const arrowDir = new THREE.Vector3(0, 1, 0);
+    const arrowOrigin = new THREE.Vector3(0, -1.8, 0);
+    const arrowHelper = new THREE.ArrowHelper(arrowDir, arrowOrigin, 1.0, 0xffffff, 0.15, 0.08);
+    arrowHelper.line.material.opacity = 0.3;
+    arrowHelper.line.material.transparent = true;
+    arrowHelper.cone.material.opacity = 0.3;
+    arrowHelper.cone.material.transparent = true;
+    scene.add(arrowHelper);
+
+    // Board-frame axis helpers (X=red, Y=green, Z=blue) — will be parented to model
+    let axisGroup = new THREE.Group();
+    const axisLen = 2.0;
+    const axisColors = [0xf85149, 0x56d364, 0x79c0ff];
+    const axisDirs = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+    for (let i = 0; i < 3; i++) {
+      const ah = new THREE.ArrowHelper(axisDirs[i], new THREE.Vector3(), axisLen, axisColors[i], 0.3, 0.15);
+      axisGroup.add(ah);
+    }
+
+    // Local point light for impact side visualization
+    const impactLight = new THREE.PointLight(0xff0000, 0, 10);
+    axisGroup.add(impactLight);
+
+    scene.add(axisGroup);
+
+    // Load the GLB model
+    const loader = new GLTFLoader();
+    loader.load(
+      'models/niclaSenseME.glb',
+      (gltf) => {
+        niclaModel = gltf.scene;
+
+        // Auto-center and scale so the board is ~2.5 units across
+        const box = new THREE.Box3().setFromObject(niclaModel);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+
+        // Center the model at the origin
+        niclaModel.position.sub(center);
+
+        // Scale: target longest dimension = 2.5 units
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const targetSize = 2.5;
+        const scl = targetSize / maxDim;
+        niclaModel.scale.setScalar(scl);
+
+        scene.add(niclaModel);
+
+        niclaModel.traverse((o) => {
+          if (o.isMesh && o.material) {
+            const mats = Array.isArray(o.material) ? o.material : [o.material];
+            mats.forEach((m) => {
+              if (m.metalness !== undefined) m.metalness = Math.min(m.metalness, 0.5);
+              if (m.roughness !== undefined) m.roughness = Math.min(m.roughness, 0.8);
+              m.needsUpdate = true;
+            });
+          }
+        });
+
+        // Look down at the board from above-front, so a flat board reads like the TOP VIEW
+        camera.position.set(0, 4.5, 3.5);
+        controls.target.set(0, 0, 0);
+        controls.update();
+
+        // VISUAL rest-pose offset — rotates the GLB so component side faces "up"
+        // when the sensor is flat. Tweak these 3 angles until the flat board on
+        // your table looks exactly like the official TOP VIEW.
+        niclaModel.userData.visualOffset = new THREE.Quaternion()
+          .setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)); // try -90° about X first
+
+        loadingOverlay.classList.add('hidden');
+        console.log(`[3D] niclaSenseME.glb loaded ✓  original size: ${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)}, scale=${scl.toFixed(6)}`);
+      },
+      (progress) => {
+        if (progress.total) {
+          const pct = Math.round(progress.loaded / progress.total * 100);
+          document.getElementById('loading-text').textContent =
+            `Loading niclaSenseME.glb… ${pct}%`;
+        }
+      },
+      (err) => {
+        console.error('[3D] Failed to load GLB:', err);
+        document.getElementById('loading-text').textContent =
+          '❌ Failed to load model. Is the HTTP server running?';
+      }
+    );
+
+    // Resize handler
+    function resizeThree() {
+      const w = threeContainer.clientWidth;
+      const h = threeContainer.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    }
+    window.addEventListener('resize', resizeThree);
+    new ResizeObserver(resizeThree).observe(threeContainer);
+    resizeThree();
+
+    // Quaternion target (smooth interpolation)
+    const targetQuat = new THREE.Quaternion(0, 0, 0, 1);
+
+    // ── Axis remap: swap the crossed sensor↔scene axes ──
+    // Your symptom: rotating about the board's vertical (yaw) shows as up/down (pitch),
+    // meaning sensor-Z is landing on scene-X. A 90° rotation about Y re-routes them.
+    // If it's still wrong, try the other AXIS_FIX options below.
+    const AXIS_FIX = new THREE.Quaternion()
+      .setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+
+    const q_sensor = new THREE.Quaternion();
+    let q_ref_inv = new THREE.Quaternion(0, 0, 0, 1);
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'z' || e.key === 'Z') {
+        q_ref_inv.copy(q_sensor).invert();
+        console.log('[3D] Orientation zeroed to current pose');
+      }
+    });
+
+    // Render loop
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // Apply quaternion to model
+      if (niclaModel) {
+        // sensor orientation, then visual rest-pose offset
+        const composed = targetQuat.clone();
+        if (niclaModel.userData.visualOffset) {
+          composed.multiply(niclaModel.userData.visualOffset);
+        }
+        niclaModel.quaternion.slerp(composed, 0.15);
+      }
+      // Mirror rotation on axis helpers
+      axisGroup.quaternion.copy(niclaModel ? niclaModel.quaternion : targetQuat);
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+
+    // ══════════════════════════════════════════════════════════════
+    //  WEBSOCKET CONNECTION
+    // ══════════════════════════════════════════════════════════════
+    const statusEl = document.getElementById('ws-status');
+    let ws = null;
+    let wsReconnectTimer = null;
+
+    function connectWS() {
+      statusEl.className = 'wait';
+      statusEl.textContent = '⏳ Connecting to bridge…';
+
+      ws = new WebSocket('ws://localhost:8765');
+
+      ws.onopen = () => {
+        statusEl.className = 'ok';
+        statusEl.textContent = '● Bridge connected';
+        console.log('[WS] Connected');
+      };
+
+      ws.onclose = () => {
+        statusEl.className = 'err';
+        statusEl.textContent = '✖ Bridge disconnected';
+        console.log('[WS] Disconnected — reconnecting in 2s…');
+        wsReconnectTimer = setTimeout(connectWS, 2000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'sample') onSample(msg);
+          else if (msg.type === 'status') { bleStatus = msg.text; }
+          else if (msg.type === 'ble_connected') {
+            statusEl.className = 'ok';
+            statusEl.textContent = '● BLE + Bridge connected';
+          }
+        } catch (e) { /* ignore bad frames */ }
+      };
+    }
+    connectWS();
+
+
+    // ══════════════════════════════════════════════════════════════
+    //  SAMPLE HANDLER  (mirrors on_sample in live_stream.py)
+    // ══════════════════════════════════════════════════════════════
+    function onSample(s) {
+      if (t0_ms === null) t0_ms = s.ts;
+      const tRel = s.ts - t0_ms;
+      const R = Math.sqrt(s.ax * s.ax + s.ay * s.ay + s.az * s.az);
+
+      buf_t.push(tRel);
+      buf_ax.push(s.ax); buf_ay.push(s.ay); buf_az.push(s.az);
+      buf_R.push(R);
+      buf_gx.push(s.gx); buf_gy.push(s.gy); buf_gz.push(s.gz);
+
+      latest_quat = { qx: s.qx, qy: s.qy, qz: s.qz, qw: s.qw };
+      totalSamples++;
+
+      // Update Three.js quaternion target
+      q_sensor.set(s.qx, s.qy, s.qz, s.qw).normalize();
+
+      // remapped = AXIS_FIX * q_sensor * AXIS_FIX⁻¹   (basis change)
+      const remapped = AXIS_FIX.clone()
+        .multiply(q_sensor)
+        .multiply(AXIS_FIX.clone().invert());
+
+      // then remove the constant offset captured by the Z key
+      targetQuat.copy(q_ref_inv).multiply(remapped).normalize();
+    }
+
+
+    // ══════════════════════════════════════════════════════════════
+    //  UI UPDATE LOOP  (runs at ~10 fps, matching live_stream.py's 100ms interval)
+    // ══════════════════════════════════════════════════════════════
+    const phaseCell = document.getElementById('phase-cell');
+    const phaseLbl = document.getElementById('phase-label');
+    const phaseSub = document.getElementById('phase-sub');
+    const gReadout = document.getElementById('g-readout');
+    const eulerLabel = document.getElementById('euler-label');
+    const statsPre = document.getElementById('stats-pre');
+
+    setInterval(updateUI, 100);
+
+    function updateUI() {
+      if (buf_t.length < 2) return;
+
+      const t = buf_t.array;
+      const ax = buf_ax.array;
+      const ay = buf_ay.array;
+      const az = buf_az.array;
+      const R = buf_R.array;
+      const gx = buf_gx.array;
+      const gy = buf_gy.array;
+      const gz = buf_gz.array;
+
+      // Window slice
+      const tLast = t[t.length - 1];
+      let startIdx = 0;
+      for (let i = 0; i < t.length; i++) {
+        if (t[i] >= tLast - WINDOW_MS) { startIdx = i; break; }
+      }
+
+      const tw = t.slice(startIdx);
+      const aw = ax.slice(startIdx);
+      const ayw = ay.slice(startIdx);
+      const azw = az.slice(startIdx);
+      const Rw = R.slice(startIdx);
+      const gxw = gx.slice(startIdx);
+      const gyw = gy.slice(startIdx);
+      const gzw = gz.slice(startIdx);
+
+      // ── Update chart data ──
+      function toXY(tArr, vArr) {
+        const pts = [];
+        // Downsample to max 400 points for performance
+        const step = Math.max(1, Math.floor(tArr.length / 400));
+        for (let i = 0; i < tArr.length; i += step) {
+          pts.push({ x: tArr[i] - tLast, y: vArr[i] });
+        }
+        return pts;
+      }
+
+      chartAcc.data.datasets[0].data = toXY(tw, aw);
+      chartAcc.data.datasets[1].data = toXY(tw, ayw);
+      chartAcc.data.datasets[2].data = toXY(tw, azw);
+
+      const accExt = Math.max(
+        Math.max(...aw.map(Math.abs)),
+        Math.max(...ayw.map(Math.abs)),
+        Math.max(...azw.map(Math.abs)),
+      );
+      chartAcc.options.scales.x.min = tw[0] - tLast;
+      chartAcc.options.scales.x.max = 1;
+      chartAcc.options.scales.y.min = -Math.max(1.5, accExt + 0.3);
+      chartAcc.options.scales.y.max = Math.max(2.0, accExt + 0.3);
+      chartAcc.update('none');
+
+      chartGyro.data.datasets[0].data = toXY(tw, gxw);
+      chartGyro.data.datasets[1].data = toXY(tw, gyw);
+      chartGyro.data.datasets[2].data = toXY(tw, gzw);
+
+      const gExt = Math.max(
+        Math.max(...gxw.map(Math.abs)),
+        Math.max(...gyw.map(Math.abs)),
+        Math.max(...gzw.map(Math.abs)),
+      );
+      chartGyro.options.scales.x.min = tw[0] - tLast;
+      chartGyro.options.scales.x.max = 1;
+      chartGyro.options.scales.y.min = -Math.max(30, gExt * 1.15);
+      chartGyro.options.scales.y.max = Math.max(30, gExt * 1.15);
+      chartGyro.update('none');
+
+      chartR.data.datasets[0].data = toXY(tw, Rw);
+      chartR.options.scales.x.min = tw[0] - tLast;
+      chartR.options.scales.x.max = 1;
+      chartR.options.scales.y.min = -0.1;
+      chartR.options.scales.y.max = Math.max(2.5, Math.max(...Rw) * 1.15);
+      chartR.update('none');
+
+      const lastAx = aw[aw.length - 1];
+      const lastAy = ayw[ayw.length - 1];
+      const lastAz = azw[azw.length - 1];
+      const lastGx = gxw[gxw.length - 1];
+      const lastGy = gyw[gyw.length - 1];
+      const lastGz = gzw[gzw.length - 1];
+      const gyroMag = Math.sqrt(lastGx * lastGx + lastGy * lastGy + lastGz * lastGz);
+
+      // ── Phase ──
+      const { phase, Rmed } = phaseOfSmart();
+      const cfg = PHASE_CFG[phase];
+
+      phaseLbl.textContent = cfg.lbl;
+      phaseLbl.style.color = cfg.col;
+      phaseSub.textContent = cfg.sub;
+
+      const recentR = buf_R.last(SMOOTH_N);
+      const winMax = recentR.length ? Math.max(...recentR) : 0;
+      gReadout.textContent = `|g| = ${Rw[Rw.length - 1].toFixed(3)}  (win-max ${winMax.toFixed(2)})`;
+
+      phaseCell.classList.toggle('impact', phase === 'IMPACT');
+
+      // ── Impact Visualizer (Light up the impacted side) ──
+      if (phase === 'IMPACT') {
+        // The force vector is opposite to acceleration
+        const v_sensor = new THREE.Vector3(-lastAx, -lastAy, -lastAz).normalize();
+        v_sensor.applyQuaternion(AXIS_FIX); // Remap axes to match axisGroup
+        
+        // Position the red light slightly outside the board on the side of the impact
+        impactLight.position.copy(v_sensor).multiplyScalar(2.0);
+        
+        const rMag = Rw[Rw.length - 1];
+        impactLight.intensity = Math.min(20, Math.max(5, rMag * 2)); // Strong red flash
+      } else if (phase === 'IDLE' || phase === 'SETTLE') {
+        impactLight.intensity = 0; // Turn off the flash
+      }
+
+      // ── Euler angles (from quaternion) ──
+      const { qx, qy, qz, qw } = latest_quat;
+      const sinr = 2 * (qw * qx + qy * qz);
+      const cosr = 1 - 2 * (qx * qx + qy * qy);
+      const roll = Math.atan2(sinr, cosr) * 180 / Math.PI;
+      const sinp = Math.max(-1, Math.min(1, 2 * (qw * qy - qz * qx)));
+      const pitch = Math.asin(sinp) * 180 / Math.PI;
+      const siny = 2 * (qw * qz + qx * qy);
+      const cosy = 1 - 2 * (qy * qy + qz * qz);
+      const yaw = Math.atan2(siny, cosy) * 180 / Math.PI;
+
+      eulerLabel.textContent = `R=${roll >= 0 ? '+' : ''}${roll.toFixed(0)}°  P=${pitch >= 0 ? '+' : ''}${pitch.toFixed(0)}°  Y=${yaw >= 0 ? '+' : ''}${yaw.toFixed(0)}°`;
+
+      // ── Stats panel (exact same fields as live_stream.py) ──
+
+      let ffCount = 0;
+      for (let i = 0; i < Rw.length; i++) if (Rw[i] < FF_THRESH_G) ffCount++;
+      const ffMs = ffCount * (1000 / 200);
+
+      statsPre.textContent = [
+        `Status : ${bleStatus}`,
+        `Phase  : ${phase}`,
+        ``,
+        `Cur |g|: ${(Rw[Rw.length - 1] >= 0 ? '+' : '')}${Rw[Rw.length - 1].toFixed(3)} g`,
+        `Max |g|: ${Math.max(...Rw).toFixed(3)} g`,
+        `FF dur : ${ffMs.toFixed(0)} ms`,
+        ``,
+        `Acc X  : ${lastAx >= 0 ? '+' : ''}${lastAx.toFixed(3)} g`,
+        `Acc Y  : ${lastAy >= 0 ? '+' : ''}${lastAy.toFixed(3)} g`,
+        `Acc Z  : ${lastAz >= 0 ? '+' : ''}${lastAz.toFixed(3)} g`,
+        ``,
+        `Gyr X  : ${lastGx >= 0 ? '+' : ''}${lastGx.toFixed(1)}°/s`,
+        `Gyr Y  : ${lastGy >= 0 ? '+' : ''}${lastGy.toFixed(1)}°/s`,
+        `Gyr Z  : ${lastGz >= 0 ? '+' : ''}${lastGz.toFixed(1)}°/s`,
+        `|ω|    : ${gyroMag.toFixed(1)}°/s`,
+        ``,
+        `Roll   : ${roll >= 0 ? '+' : ''}${roll.toFixed(1)}°`,
+        `Pitch  : ${pitch >= 0 ? '+' : ''}${pitch.toFixed(1)}°`,
+        `Yaw    : ${yaw >= 0 ? '+' : ''}${yaw.toFixed(1)}°`,
+        ``,
+        `Samples: ${totalSamples}`,
+      ].join('\n');
+    }
+  </script>
+</body>
+
+</html>
